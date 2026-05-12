@@ -189,11 +189,25 @@ def parse_rent_roll(file_path: str) -> dict:
 
     # ── Parse unit rows ───────────────────────────────────────────────────
     units = []
+    STOP_WORDS = {"total", "totals", "average", "averages", "notes", "subtotal"}
+
     for row in all_rows[header_idx + 1:]:
         if all(v is None or v == "" for v in row):
             continue
         unit_no = str(row[col_map["unit_no"]]).strip() if col_map.get("unit_no") is not None and row[col_map["unit_no"]] is not None else None
         if not unit_no or unit_no.lower() in ("none", ""):
+            continue
+        # Stop at summary/totals/notes rows — anything below TOTALS line is not a real unit
+        if any(sw in unit_no.lower() for sw in STOP_WORDS):
+            break
+        # Also stop if unit_no starts with bullet or special char (notes section)
+        if unit_no.startswith(("•", "*", "#", "Note")):
+            break
+        # Skip legend/placeholder rows that have no SF and no market rent
+        # (e.g. unit-type legend rows like B04, C1 at bottom of some rent rolls)
+        raw_sf     = row[col_map["unit_size_sf"]]   if "unit_size_sf" in col_map else None
+        raw_market = row[col_map["market_rent"]]     if "market_rent"  in col_map else None
+        if raw_sf is None and raw_market is None:
             continue
 
         sf           = _safe_float(row[col_map["unit_size_sf"]]) if "unit_size_sf" in col_map else None

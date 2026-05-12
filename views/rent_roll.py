@@ -48,7 +48,7 @@ def render(rr_data: dict | None):
     kpis = [
         ("Total Units",     fmt_number(total),          "🏢", None),
         ("Occupied",        fmt_number(occ_u),          "✅", True),
-        ("Physical Occ.",   fmt_pct(occ_p * 100),       "📊", occ_p >= 0.92),
+        ("Physical Occ.",   fmt_pct(occ_p),             "📊", occ_p >= 0.92),
         ("Avg In-Place",    fmt_currency(avg_ip),        "💰", None),
         ("Avg Market Rent", fmt_currency(avg_mkt),       "🎯", None),
         ("Loss-to-Lease",   fmt_currency(ltl),           "📉", ltl < 0),
@@ -104,26 +104,23 @@ def render(rr_data: dict | None):
         st.markdown('<div class="dash-card"><div class="dash-card-title">4. Lease Expirations (Next 12 Mo.)</div>', unsafe_allow_html=True)
         if exps:
             from datetime import date
-            today = date.today()
-            next12 = {}
-            for k, v in exps.items():
+            # Show last 6 months + all future — gives full picture
+            all_months = {}
+            for k, v in sorted(exps.items()):
                 try:
                     yr, mo = int(k[:4]), int(k[5:])
                     d = date(yr, mo, 1)
-                    delta = (d - today).days
-                    if 0 <= delta <= 365:
-                        import calendar
-                        label = d.strftime("%b '%y")
-                        next12[label] = v
+                    label = d.strftime("%b '%y")
+                    all_months[label] = v
                 except Exception:
                     pass
-            if next12:
+            if all_months:
                 st.plotly_chart(
-                    lease_expiration_chart(list(next12.keys()), list(next12.values())),
+                    lease_expiration_chart(list(all_months.keys()), list(all_months.values())),
                     use_container_width=True, config={"displayModeBar": False},
                 )
             else:
-                st.info("No upcoming expirations in next 12 months.")
+                st.info("No expiration data available.")
         else:
             st.info("No expiration data.")
         st.markdown("</div>", unsafe_allow_html=True)

@@ -94,7 +94,7 @@ def _get_portfolio_noi() -> str:
 
 def _get_portfolio_occ() -> str:
     occ = st.session_state.get("rr_data", {}).get("summary", {}).get("physical_occ")
-    return fmt_pct(occ * 100) if occ else "—"
+    return fmt_pct(occ) if occ else "—"
 
 
 def _empty_state():

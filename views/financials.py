@@ -37,8 +37,8 @@ def render(t12_data: dict | None, rr_data: dict | None, budget_data: dict | None
         ("Total Revenue (T12)", fmt_currency(rev, 0), "📈", None),
         ("Total Expenses (T12)", fmt_currency(exp, 0), "💸", None),
         ("Net Operating Income", fmt_currency(noi, 0), "🏦", None),
-        ("NOI Margin", fmt_pct(margin * 100 if margin else None), "📊", None),
-        ("Occupancy", fmt_pct(occ * 100 if occ else None) if occ else "—", "🏠",
+        ("NOI Margin", fmt_pct(margin) if margin else "—", "📊", None),
+        ("Occupancy", fmt_pct(occ) if occ else "—", "🏠",
          True if occ and occ >= 0.92 else (False if occ else None)),
         ("Budget Variance", "Upload Budget →" if not budget_data else fmt_currency(0), "📋", None),
     ]
