@@ -361,3 +361,33 @@ def capex_by_category(categories, budgets, actuals, height=320):
         xaxis=dict(tickangle=-30, tickfont=dict(size=10)),
     )
     return fig
+
+
+# ── Actual vs Budget (monthly bars + dashed budget line) ─────────────────────
+def actual_vs_budget_bar(month_labels, actuals, budgets=None, height=340):
+    """
+    Actual monthly revenue (bars) overlaid with budget (dashed line).
+    If `budgets` is None or all-None, renders bars only — caller can pre-decide
+    whether to display.
+    """
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=month_labels, y=actuals, name="Actual",
+        marker_color=COLORS["accent_blue"],
+        hovertemplate="<b>%{x}</b><br>Actual: $%{y:,.0f}<extra></extra>",
+    ))
+    if budgets and any(b is not None for b in budgets):
+        fig.add_trace(go.Scatter(
+            x=month_labels, y=budgets, name="Budget",
+            mode="lines+markers",
+            line=dict(color=COLORS["accent_cyan"], width=2, dash="dash"),
+            marker=dict(size=5),
+            hovertemplate="<b>%{x}</b><br>Budget: $%{y:,.0f}<extra></extra>",
+        ))
+    fig.update_layout(
+        **_base_layout(height=height, legend_y=-0.22, margin=dict(l=70, r=20, t=20, b=60)),
+        xaxis=dict(**_AXIS, tickangle=-30),
+        yaxis=dict(**_AXIS, tickprefix="$", tickformat=",.0f"),
+        bargap=0.25,
+    )
+    return fig
