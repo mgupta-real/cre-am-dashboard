@@ -9,8 +9,8 @@ Renders:
   - Revenue Mix + Expense Mix donuts
   - T12/T6/T3/Current NOI comparison
   - NOI Margin Trend, NOI Bridge
-  - Budget Variance Watchlist (when budget uploaded)
-  - Expanded Financial Statement (T12/T6/T3/Current/YTD/Budget/Variance/Prior/YoY)
+  - T12 vs Budget Comparison (waterfall, by-category bars, monthly, top variances)
+  - Financial Statement (T12/T6/T3/Current/YTD plus Budget/Variance when uploaded)
 """
 from datetime import datetime, date
 import streamlit as st
@@ -250,21 +250,14 @@ def render(t12_data: dict | None, rr_data: dict | None, budget_data: dict | None
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Budget Variance Watchlist (only if budget uploaded) ────────────────
-    if budget_data:
-        st.markdown(
-            '<div class="dash-card"><div class="dash-card-title">'
-            'Budget Variance Watchlist</div>',
-            unsafe_allow_html=True,
-        )
-        _render_budget_watchlist(budget_data)
-        st.markdown("</div>", unsafe_allow_html=True)
-
     # ── T12 vs Budget Comparison ──────────────────────────────────────────
     # If no budget loaded, show an upload prompt; if loaded, render the full
     # comparison suite (waterfall, by-category bars, monthly trend, top
     # variances).
     _render_t12_vs_budget_section(t12_data, budget_data)
+
+    # ── Financial Statement (T12 / T6 / T3 / Current Mo. / YTD + Budget) ──
+    _render_financial_statement(t12_data, budget_data)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -409,14 +402,6 @@ def _render_empty_state():
     </div>
     """, unsafe_allow_html=True)
 
-
-def _render_budget_watchlist(budget_data: dict):
-    rows = budget_data.get("line_items", [])
-    if not rows:
-        st.info("No budget line items available.")
-        return
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -810,3 +795,385 @@ def _render_top_variances(actual_cats: dict, budget_cats: dict):
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("No unfavorable variances above $100.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Financial Statement
+#
+# A category-aware P&L table that works for both:
+#   (a) Anvil-style T12 templates where line_items ARE the subtotal rows
+#       (GROSS POTENTIAL RENT, TOTAL REVENUE, etc.)
+#   (b) Categorized T12 exports where line_items are GL accounts and the
+#       summary names appear only in the Category column.
+#
+# Strategy:
+#   - For each table row, try a direct line_item lookup first.
+#   - Fall back to summing all non-subtotal items under a matching Category.
+#   - YTD is computed from the monthly arrays (months in the current
+#     calendar year of the as-of date).
+#   - When budget_data is loaded, the Budget (YTD), Variance, and Variance %
+#     columns populate; otherwise they show "—".
+# ──────────────────────────────────────────────────────────────────────────────
+def _render_financial_statement(t12_data: dict, budget_data: dict | None):
+    """Render the financial statement table at the bottom of the financials tab."""
+    st.markdown(
+        '<div class="dash-card"><div class="dash-card-title">'
+        'Financial Statement (T12)</div>',
+        unsafe_allow_html=True,
+    )
+
+    rows_data = _build_statement_rows(t12_data, budget_data)
+    _render_statement_html(rows_data, has_budget=budget_data is not None)
+
+    if budget_data:
+        note = (
+            "All values in USD. Budget (YTD) is pro-rated from the full-year budget."
+        )
+    else:
+        note = (
+            "All values in USD. Budget / Variance columns populate when a budget "
+            "is uploaded in the Upload Center."
+        )
+    st.markdown(
+        f'<p style="color:#8BA3C7;font-size:11px;margin-top:6px;">{note}</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _build_statement_rows(t12_data: dict, budget_data: dict | None) -> list[dict]:
+    """
+    Build the list of row dicts that drive the HTML table.
+
+    Each row is one of:
+      - "header"   — section banner (REVENUE, OPERATING EXPENSES)
+      - "data"     — a line item with values
+      - "subtotal" — emphasized line item (Net Rental Income, Controllable Expenses)
+      - "total"    — section total (TOTAL REVENUE, TOTAL OPERATING EXPENSES, NOI)
+    """
+    line_items = t12_data.get("line_items") or []
+    month_dates = t12_data.get("month_dates") or []
+    summary = t12_data.get("summary") or {}
+
+    # YTD month indices (current calendar year of latest month)
+    ytd_indices: list[int] = []
+    if month_dates:
+        last_year = getattr(month_dates[-1], "year", None)
+        if last_year is not None:
+            ytd_indices = [i for i, d in enumerate(month_dates)
+                           if getattr(d, "year", None) == last_year]
+
+    # Line-item index by lowercase name
+    by_item: dict[str, dict] = {}
+    for li in line_items:
+        key = (li.get("line_item") or "").strip().lower()
+        if not key:
+            continue
+        prev = by_item.get(key)
+        if prev is None or (li.get("t12") not in (None, 0) and prev.get("t12") in (None, 0)):
+            by_item[key] = li
+
+    # Category-aggregated (skips subtotals to avoid double-counting)
+    cat_totals = _category_totals(t12_data, n_months=len(month_dates) or 12)
+    cat_lc = {k.lower(): v for k, v in cat_totals.items()}
+
+    # Budget category aggregation
+    budget_cat_lc = {}
+    if budget_data:
+        bcats = _category_totals(budget_data, n_months=len(month_dates) or 12)
+        budget_cat_lc = {k.lower(): v for k, v in bcats.items()}
+
+    # Budget line-item index
+    budget_by_item = {}
+    if budget_data:
+        for bi in (budget_data.get("line_items") or []):
+            key = (bi.get("line_item") or "").strip().lower()
+            if key:
+                prev = budget_by_item.get(key)
+                if prev is None or (bi.get("t12") not in (None, 0) and prev.get("t12") in (None, 0)):
+                    budget_by_item[key] = bi
+
+    def _ytd_from_monthly(monthly: list | None):
+        if not monthly or not ytd_indices:
+            return None
+        vals = [monthly[i] for i in ytd_indices
+                if i < len(monthly) and monthly[i] is not None]
+        return sum(vals) if vals else None
+
+    def lookup(label_candidates: list[str], category_candidates: list[str] = None):
+        """
+        Return a dict {t12, t6, t3, t1, ytd, budget_t12, budget_ytd} for the row.
+
+        Tries each line-item candidate against the parsed file. If none have a
+        non-zero T12 value, falls back to summing across the matching category.
+        """
+        result = {"t12": None, "t6": None, "t3": None, "t1": None, "ytd": None,
+                  "budget_t12": None, "budget_ytd": None}
+
+        # Try line-item lookup first
+        li = None
+        for cand in label_candidates:
+            hit = by_item.get(cand.strip().lower())
+            if hit is not None and hit.get("t12") not in (None, 0):
+                li = hit
+                break
+        # Substring match if no exact hit
+        if li is None:
+            for cand in label_candidates:
+                needle = cand.strip().lower()
+                best = None
+                for name_lc, candidate in by_item.items():
+                    if needle in name_lc and candidate.get("t12") not in (None, 0):
+                        if best is None or len(name_lc) < len(best[0]):
+                            best = (name_lc, candidate)
+                if best:
+                    li = best[1]
+                    break
+        # Last-ditch: line item with any value
+        if li is None:
+            for cand in label_candidates:
+                hit = by_item.get(cand.strip().lower())
+                if hit is not None:
+                    li = hit
+                    break
+
+        if li is not None:
+            result["t12"] = li.get("t12")
+            result["t6"]  = li.get("t6")
+            result["t3"]  = li.get("t3")
+            result["t1"]  = li.get("t1")
+            result["ytd"] = _ytd_from_monthly(li.get("monthly"))
+
+        # Fall back to category aggregation if line-item miss or zero
+        if result["t12"] in (None, 0) and category_candidates:
+            for ccand in category_candidates:
+                ckey = ccand.strip().lower()
+                if ckey in cat_lc:
+                    e = cat_lc[ckey]
+                    result["t12"] = e["t12"]
+                    result["t6"]  = e["t6"]
+                    result["t3"]  = e["t3"]
+                    result["t1"]  = e["t1"]
+                    result["ytd"] = _ytd_from_monthly(e["monthly"])
+                    break
+
+        # Budget lookup — same line-item-then-category fallback
+        if budget_data:
+            bli = None
+            for cand in label_candidates:
+                hit = budget_by_item.get(cand.strip().lower())
+                if hit is not None and hit.get("t12") not in (None, 0):
+                    bli = hit
+                    break
+            if bli is not None:
+                result["budget_t12"] = bli.get("t12")
+                # Pro-rate to YTD by months-in-window
+                if bli.get("t12") is not None and ytd_indices:
+                    result["budget_ytd"] = bli["t12"] * (len(ytd_indices) / 12)
+
+            # Category fallback for budget
+            if result["budget_t12"] in (None, 0) and category_candidates:
+                for ccand in category_candidates:
+                    ckey = ccand.strip().lower()
+                    if ckey in budget_cat_lc:
+                        e = budget_cat_lc[ckey]
+                        result["budget_t12"] = e["t12"]
+                        if e["t12"] is not None and ytd_indices:
+                            result["budget_ytd"] = e["t12"] * (len(ytd_indices) / 12)
+                        break
+
+        return result
+
+    # ── Build rows ─────────────────────────────────────────────────────────
+    # Each entry: (label, indent, kind, line_item_candidates, category_candidates)
+    # Kind is one of "header", "data", "subtotal", "total".
+    SPEC = [
+        ("REVENUE",                 0, "header", [], []),
+        ("Gross Potential Rent",    1, "data",
+         ["gross potential rent", "residential income", "rent"],
+         ["Gross Potential Rents", "Gross Potential Rent"]),
+        ("Loss to Lease",           1, "data",
+         ["market loss to lease", "gain / loss to lease", "loss to lease"],
+         ["Less: Loss to Lease"]),
+        ("Concessions",             1, "data",
+         ["less rent concessions", "concessions"],
+         ["Less: Concessions"]),
+        ("Vacancy Loss",            1, "data",
+         ["less loss to vacancies", "vacancy loss"],
+         ["Less: Vacancy Loss"]),
+        ("Bad Debt",                1, "data",
+         ["tenant uncollectables", "bad debt", "rent write offs"],
+         ["Less: Bad Debt"]),
+        ("Net Rental Income",       1, "subtotal",
+         ["total net rental income", "net rental income", "rental income"],
+         []),
+        ("Other Income",            1, "data",
+         ["total other income", "total ancillary prop income",
+          "total other prop income", "other income"],
+         ["Fee Income", "RUBS", "Late Fee/NSF/Termination Fee",
+          "Pet Charge", "Parking Income", "Laundry",
+          "Miscellaneous Revenue", "Month-to-Month"]),
+        ("TOTAL REVENUE",           0, "total",
+         ["total revenue", "total income"], []),
+
+        ("OPERATING EXPENSES",      0, "header", [], []),
+        ("Payroll",                 1, "data",
+         ["total payroll expense", "payroll"],
+         ["Personnel Costs", "Payroll"]),
+        ("Repairs & Maintenance",   1, "data",
+         ["total repair and maint expenses", "total repair & maint expenses",
+          "repairs & maintenance", "repairs and maintenance"],
+         ["Repairs & Maintenance"]),
+        ("Turnover",                1, "data",
+         ["turnover expenses", "turnover"],
+         ["Turnover"]),
+        ("Contract Services",       1, "data",
+         ["contract services"],
+         ["Contract Services"]),
+        ("Utilities",               1, "data",
+         ["total utility expense", "utilities"],
+         ["Utilities"]),
+        ("Landscaping",             1, "data",
+         ["landscape maintenance contract", "landscaping"],
+         ["Landscaping"]),
+        ("Marketing",               1, "data",
+         ["total advertising promo", "advertising & promotion", "marketing"],
+         ["Advertising & Promotion", "Marketing"]),
+        ("Administrative",          1, "data",
+         ["total administrative", "administrative"],
+         ["Administrative"]),
+        ("Management Fees",         1, "data",
+         ["total professional fees", "management fees", "management fee",
+          "external management fee expense"],
+         ["Management Fees"]),
+        ("Real Estate Taxes",       1, "data",
+         ["total re tax", "total real estate taxes", "real estate taxes"],
+         ["Real Estate Taxes"]),
+        ("Insurance",               1, "data",
+         ["total insurance expense", "insurance"],
+         ["Insurance"]),
+        ("TOTAL OPERATING EXPENSES",0, "total",
+         ["total operating expenses", "operating expenses"], []),
+        ("NET OPERATING INCOME",    0, "total",
+         ["net operating income/(loss)", "net operating income", "noi"], []),
+    ]
+
+    rows: list[dict] = []
+    for label, indent, kind, label_cands, cat_cands in SPEC:
+        if kind == "header":
+            rows.append({"label": label, "indent": indent, "kind": kind})
+            continue
+        vals = lookup(label_cands, cat_cands)
+        # Compute variance
+        variance = (
+            vals["ytd"] - vals["budget_ytd"]
+            if (vals["ytd"] is not None and vals["budget_ytd"] is not None)
+            else None
+        )
+        variance_pct = (
+            variance / abs(vals["budget_ytd"])
+            if (variance is not None and vals["budget_ytd"] not in (None, 0))
+            else None
+        )
+        rows.append({
+            "label":         label,
+            "indent":        indent,
+            "kind":          kind,
+            "t12":           vals["t12"],
+            "t6":            vals["t6"],
+            "t3":            vals["t3"],
+            "t1":            vals["t1"],
+            "ytd":           vals["ytd"],
+            "budget_ytd":    vals["budget_ytd"],
+            "variance":      variance,
+            "variance_pct":  variance_pct,
+        })
+    return rows
+
+
+def _render_statement_html(rows_data: list[dict], has_budget: bool):
+    """Render the financial statement as a styled HTML table."""
+    css = """
+    <style>
+    .fin-tbl-wrap { overflow-x:auto; }
+    .fin-tbl { width:100%; min-width:900px; border-collapse:collapse;
+               font-family:Inter,sans-serif; font-size:12.5px; }
+    .fin-tbl th { background:#0A1525; color:#8BA3C7; font-size:10.5px;
+                  text-transform:uppercase; letter-spacing:.06em;
+                  padding:9px 10px; text-align:right;
+                  border-bottom:1px solid #1E2D4A; white-space:nowrap; }
+    .fin-tbl th:first-child { text-align:left; }
+    .fin-tbl td { padding:7px 10px; border-bottom:1px solid #1A2540;
+                  white-space:nowrap; }
+    .fin-tbl td:not(:first-child) { text-align:right;
+                                    font-variant-numeric:tabular-nums;
+                                    font-family:'SF Mono',monospace; }
+    .row-header   { background:#0A1525 !important; color:#00C2FF !important;
+                    font-weight:700; text-transform:uppercase;
+                    letter-spacing:.06em; font-size:11.5px; }
+    .row-total    { background:#0D1A2F !important; color:#F0F4FF !important;
+                    font-weight:700; font-size:13px; }
+    .row-subtotal { background:#0D1A2F !important; color:#E0ECFF !important;
+                    font-weight:600; }
+    .row-normal   { color:#C8D8F0; }
+    .row-normal:nth-child(even) { background:#0F1B30; }
+    .pos { color:#00C48C; }
+    .neg { color:#FF4560; }
+    .muted { color:#4A6080; }
+    </style>
+    """
+
+    cols_html = "".join([
+        '<th style="width:24%">Line Item</th>',
+        '<th>T12</th><th>T6</th><th>T3</th><th>Current Mo.</th><th>YTD</th>',
+    ])
+    if has_budget:
+        cols_html += '<th>Budget (YTD)</th><th>Variance</th><th>Variance %</th>'
+    head = f'<div class="fin-tbl-wrap"><table class="fin-tbl"><thead><tr>{cols_html}</tr></thead><tbody>'
+
+    body = []
+    for r in rows_data:
+        indent_pad = "\u00a0" * (6 * r["indent"])
+        label = indent_pad + r["label"]
+
+        if r["kind"] == "header":
+            n_extra_cols = 8 if has_budget else 5
+            empty_cells = '<td class="muted">—</td>' * n_extra_cols
+            body.append(f'<tr class="row-header"><td>{label}</td>{empty_cells}</tr>')
+            continue
+
+        css_cls = {"total": "row-total", "subtotal": "row-subtotal", "data": "row-normal"}[r["kind"]]
+
+        def fmt(v):
+            return fmt_currency(v) if v is not None else '<span class="muted">—</span>'
+
+        cells = [
+            f'<td>{label}</td>',
+            f'<td>{fmt(r["t12"])}</td>',
+            f'<td>{fmt(r["t6"])}</td>',
+            f'<td>{fmt(r["t3"])}</td>',
+            f'<td>{fmt(r["t1"])}</td>',
+            f'<td>{fmt(r["ytd"])}</td>',
+        ]
+
+        if has_budget:
+            cells.append(f'<td>{fmt(r["budget_ytd"])}</td>')
+            # Variance cell (colored)
+            var_v = r["variance"]
+            if var_v is None:
+                cells.append('<td><span class="muted">—</span></td>')
+            else:
+                cls = "pos" if var_v >= 0 else "neg"
+                cells.append(f'<td class="{cls}">{fmt_currency(var_v)}</td>')
+            # Variance % cell
+            var_p = r["variance_pct"]
+            if var_p is None:
+                cells.append('<td><span class="muted">—</span></td>')
+            else:
+                cls = "pos" if var_p >= 0 else "neg"
+                cells.append(f'<td class="{cls}">{fmt_pct(var_p)}</td>')
+
+        body.append(f'<tr class="{css_cls}">{"".join(cells)}</tr>')
+
+    foot = '</tbody></table></div>'
+    st.markdown(css + head + "".join(body) + foot, unsafe_allow_html=True)
